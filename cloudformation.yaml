@@ -1,0 +1,653 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  RMM Platform - Multi-tenant Remote Monitoring and Management
+  Infrastructure: DynamoDB tables, S3 bucket, Lambda functions, API Gateway
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+  ProjectPrefix:
+    Type: String
+    Default: rmm
+    Description: Prefix for all resource names
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        PROJECT_PREFIX: !Ref ProjectPrefix
+        MSPS_TABLE: !Ref MSPsTable
+        CUSTOMERS_TABLE: !Ref CustomersTable
+        GROUPS_TABLE: !Ref GroupsTable
+        DEVICES_TABLE: !Ref DevicesTable
+        SYSTEM_INFO_TABLE: !Ref SystemInfoTable
+        COMMANDS_TABLE: !Ref CommandsTable
+        USERS_TABLE: !Ref UsersTable
+        REG_TOKENS_TABLE: !Ref RegistrationTokensTable
+        DATA_BUCKET: !Ref DataBucket
+
+Resources:
+
+  # =========================================================================
+  # DynamoDB Tables
+  # =========================================================================
+
+  MSPsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectPrefix}-${Environment}-msps
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: msp_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: msp_id
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+
+  CustomersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectPrefix}-${Environment}-customers
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: customer_id
+          AttributeType: S
+        - AttributeName: msp_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: customer_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: msp-index
+          KeySchema:
+            - AttributeName: msp_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+
+  GroupsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectPrefix}-${Environment}-groups
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: customer_id
+          AttributeType: S
+        - AttributeName: group_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: customer_id
+          KeyType: HASH
+        - AttributeName: group_id
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+
+  DevicesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectPrefix}-${Environment}-devices
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: customer_id
+          AttributeType: S
+        - AttributeName: device_id
+          AttributeType: S
+        - AttributeName: api_key
+          AttributeType: S
+        - AttributeName: group_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: customer_id
+          KeyType: HASH
+        - AttributeName: device_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: api-key-index
+          KeySchema:
+            - AttributeName: api_key
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: group-index
+          KeySchema:
+            - AttributeName: group_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+
+  SystemInfoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectPrefix}-${Environment}-system-info
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: device_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: device_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+
+  CommandsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectPrefix}-${Environment}-commands
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: device_id
+          AttributeType: S
+        - AttributeName: command_id
+          AttributeType: S
+        - AttributeName: customer_id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: device_id
+          KeyType: HASH
+        - AttributeName: command_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: customer-status-index
+          KeySchema:
+            - AttributeName: customer_id
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectPrefix}-${Environment}-users
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: email-index
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+
+  RegistrationTokensTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectPrefix}-${Environment}-reg-tokens
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: token
+          AttributeType: S
+      KeySchema:
+        - AttributeName: token
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+
+  # =========================================================================
+  # S3 Bucket — for large payloads (event logs, installers, configs)
+  # =========================================================================
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectPrefix}-${Environment}-data-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+
+  # =========================================================================
+  # IAM Role for Lambda Functions
+  # =========================================================================
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectPrefix}-${Environment}-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt MSPsTable.Arn
+                  - !GetAtt CustomersTable.Arn
+                  - !GetAtt GroupsTable.Arn
+                  - !GetAtt DevicesTable.Arn
+                  - !GetAtt SystemInfoTable.Arn
+                  - !GetAtt CommandsTable.Arn
+                  - !GetAtt UsersTable.Arn
+                  - !GetAtt RegistrationTokensTable.Arn
+                  - !Sub "${MSPsTable.Arn}/index/*"
+                  - !Sub "${CustomersTable.Arn}/index/*"
+                  - !Sub "${GroupsTable.Arn}/index/*"
+                  - !Sub "${DevicesTable.Arn}/index/*"
+                  - !Sub "${SystemInfoTable.Arn}/index/*"
+                  - !Sub "${CommandsTable.Arn}/index/*"
+                  - !Sub "${UsersTable.Arn}/index/*"
+                  - !Sub "${RegistrationTokensTable.Arn}/index/*"
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DataBucket.Arn
+                  - !Sub "${DataBucket.Arn}/*"
+
+  # =========================================================================
+  # API Gateway
+  # =========================================================================
+
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub ${ProjectPrefix}-${Environment}-api
+      StageName: !Ref Environment
+      Description: RMM Platform REST API
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-Api-Key'"
+        AllowOrigin: "'*'"
+
+  # =========================================================================
+  # Lambda Functions — Agent Endpoints
+  # =========================================================================
+
+  RegisterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-${Environment}-register
+      CodeUri: lambda/
+      Handler: functions/register/handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /agent/register
+            Method: POST
+
+  CheckinFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-${Environment}-checkin
+      CodeUri: lambda/
+      Handler: functions/checkin/handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /agent/checkin
+            Method: POST
+
+  SysInfoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-${Environment}-sysinfo
+      CodeUri: lambda/
+      Handler: functions/sysinfo/handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /agent/sysinfo
+            Method: POST
+
+  CommandResultFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-${Environment}-command-result
+      CodeUri: lambda/
+      Handler: functions/command_result/handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /agent/command-result
+            Method: POST
+
+  # =========================================================================
+  # Lambda Functions — Admin Endpoints
+  # =========================================================================
+
+  MSPsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-${Environment}-msps
+      CodeUri: lambda/
+      Handler: functions/msps/handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        List:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/msps
+            Method: GET
+        Create:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/msps
+            Method: POST
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/msps/{msp_id}
+            Method: GET
+        Update:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/msps/{msp_id}
+            Method: PUT
+        Delete:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/msps/{msp_id}
+            Method: DELETE
+
+  CustomersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-${Environment}-customers
+      CodeUri: lambda/
+      Handler: functions/customers/handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        List:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/customers
+            Method: GET
+        Create:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/customers
+            Method: POST
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/customers/{customer_id}
+            Method: GET
+        Update:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/customers/{customer_id}
+            Method: PUT
+        Delete:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/customers/{customer_id}
+            Method: DELETE
+
+  GroupsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-${Environment}-groups
+      CodeUri: lambda/
+      Handler: functions/groups/handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        List:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/customers/{customer_id}/groups
+            Method: GET
+        Create:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/customers/{customer_id}/groups
+            Method: POST
+        Delete:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/customers/{customer_id}/groups/{group_id}
+            Method: DELETE
+
+  DevicesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-${Environment}-devices
+      CodeUri: lambda/
+      Handler: functions/devices/handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        List:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/devices
+            Method: GET
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/devices/{device_id}
+            Method: GET
+        Update:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/devices/{device_id}
+            Method: PUT
+        Delete:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/devices/{device_id}
+            Method: DELETE
+
+  CommandsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-${Environment}-commands
+      CodeUri: lambda/
+      Handler: functions/commands/handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        List:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/commands
+            Method: GET
+        Create:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/commands
+            Method: POST
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/commands/{command_id}
+            Method: GET
+
+  TokensFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-${Environment}-tokens
+      CodeUri: lambda/
+      Handler: functions/tokens/handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Create:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/tokens
+            Method: POST
+        List:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/tokens
+            Method: GET
+
+  UsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-${Environment}-users
+      CodeUri: lambda/
+      Handler: functions/users/handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        List:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/users
+            Method: GET
+        Create:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/users
+            Method: POST
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/users/{user_id}
+            Method: GET
+        Update:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/users/{user_id}
+            Method: PUT
+        Delete:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /admin/users/{user_id}
+            Method: DELETE
+
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-${Environment}-auth
+      CodeUri: lambda/
+      Handler: functions/users/handler.login_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Login:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /auth/login
+            Method: POST
+
+# =========================================================================
+# Outputs
+# =========================================================================
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway URL
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+  DataBucketName:
+    Description: S3 data bucket
+    Value: !Ref DataBucket
+  MSPsTableName:
+    Value: !Ref MSPsTable
+  CustomersTableName:
+    Value: !Ref CustomersTable
+  DevicesTableName:
+    Value: !Ref DevicesTable
